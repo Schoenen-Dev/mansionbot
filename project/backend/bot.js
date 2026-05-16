@@ -1,7 +1,7 @@
 // bot.js — Headless Puppeteer version of mansion.js
 // Designed to run on Render with Chromium (headless)
 
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-core");
 const fs = require("fs");
 
 function getTimestamp() {
@@ -129,9 +129,25 @@ function looksLikeOrderMessage(raw) {
 (async function run() {
   log("🚀 Launching headless browser...");
 
+  // Find Chrome on Render's Linux environment
+  const fs_sync = require("fs");
+  const chromePaths = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+  const executablePath = chromePaths.find((p) => fs_sync.existsSync(p));
+  if (!executablePath) {
+    log("❌ No Chrome/Chromium found. Set PUPPETEER_EXECUTABLE_PATH env var on Render.");
+    process.exit(1);
+  }
+  log(`🌐 Using browser: ${executablePath}`);
+
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
