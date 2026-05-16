@@ -1,7 +1,8 @@
-// bot.js — Headless Puppeteer version of mansion.js
-// Designed to run on Render with Chromium (headless)
+// bot.js - Headless Selenium bot for Render deployment
+// Uses system Chrome/Chromium - no Puppeteer needed
 
-const puppeteer = require("puppeteer-core");
+const { Builder, By, until } = require("selenium-webdriver");
+const chrome = require("selenium-webdriver/chrome");
 const fs = require("fs");
 
 function getTimestamp() {
@@ -13,12 +14,8 @@ function minutesSince(date) {
 function log(msg) {
   console.log(`[${getTimestamp()}] ${msg}`);
 }
-
-// Append to log file too (optional)
 function logFile(msg) {
-  try {
-    fs.appendFileSync("valuenet_log.txt", `[${getTimestamp()}] ${msg}\n`);
-  } catch (e) {}
+  try { fs.appendFileSync("valuenet_log.txt", `[${getTimestamp()}] ${msg}\n`); } catch (e) {}
 }
 
 const NETWORK_SNIFFER_SCRIPT = `
@@ -32,7 +29,7 @@ const NETWORK_SNIFFER_SCRIPT = `
         const ws = protocols ? new NativeWS(url, protocols) : new NativeWS(url);
         try {
           ws.addEventListener('message', function(e) {
-            try { window.__vn_ws_messages.push({type:'ws', url: url, data: e.data, ts: Date.now()}); } catch(err) {}
+            try { window.__vn_ws_messages.push({type:'ws', url:url, data:e.data, ts:Date.now()}); } catch(err){}
           });
         } catch(err){}
         return ws;
@@ -52,7 +49,7 @@ const NETWORK_SNIFFER_SCRIPT = `
         const es = new NativeES(url, options);
         try {
           es.addEventListener('message', function(e){
-            try { window.__vn_ws_messages.push({type:'es', url: url, data: e.data, ts: Date.now()}); } catch(err){}
+            try { window.__vn_ws_messages.push({type:'es', url:url, data:e.data, ts:Date.now()}); } catch(err){}
           });
         } catch(err){}
         return es;
@@ -68,11 +65,11 @@ const NETWORK_SNIFFER_SCRIPT = `
         return nativeFetch.apply(this, arguments).then(async function(response){
           try {
             const clone = response.clone();
-            const contentType = clone.headers.get && clone.headers.get('content-type') || '';
-            if (contentType.includes('json') || contentType.includes('text')) {
+            const ct = clone.headers.get && clone.headers.get('content-type') || '';
+            if (ct.includes('json') || ct.includes('text')) {
               const txt = await clone.text().catch(()=>null);
               if (txt && txt.length < 10000) {
-                window.__vn_ws_messages.push({type:'fetch', url: arguments[0], data: txt, ts: Date.now()});
+                window.__vn_ws_messages.push({type:'fetch', url:arguments[0], data:txt, ts:Date.now()});
               }
             }
           } catch(e){}
@@ -101,7 +98,7 @@ const NETWORK_SNIFFER_SCRIPT = `
       });
       obs.observe(document.body, { childList:true, subtree:true });
     }
-    console.log("VN network sniffer installed.");
+    console.log("VN sniffer installed.");
   }
   return true;
 `;
@@ -110,10 +107,7 @@ function looksLikeOrderMessage(raw) {
   if (!raw) return false;
   let txt = raw.data ? raw.data.toString() : raw.toString();
   const l = txt.toLowerCase();
-  const keywords = [
-    "neworder","new order","order_created","orderid","order_id","lnkacceptorder",
-    "grabit","grab it","notifyorder","order_added","orders","order"
-  ];
+  const keywords = ["neworder","new order","order_created","orderid","order_id","lnkacceptorder","grabit","grab it","notifyorder","order_added","orders","order"];
   try {
     const j = JSON.parse(txt);
     if (typeof j === "object") {
@@ -127,108 +121,90 @@ function looksLikeOrderMessage(raw) {
 }
 
 (async function run() {
-  log("🚀 Launching headless browser...");
+  log("🚀 Launching headless Chrome...");
 
-  // Find Chrome on Render's Linux environment
-  const fs_sync = require("fs");
-  const chromePaths = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-  ].filter(Boolean);
-  const executablePath = chromePaths.find((p) => fs_sync.existsSync(p));
-  if (!executablePath) {
-    log("❌ No Chrome/Chromium found. Set PUPPETEER_EXECUTABLE_PATH env var on Render.");
-    process.exit(1);
+  const options = new chrome.Options();
+  options.addArguments("--headless=new");
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-setuid-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-gpu");
+  options.addArguments("--window-size=1280,800");
+  options.addArguments("--disable-extensions");
+  options.addArguments("--single-process");
+
+  // Use system chromium on Render
+  const chromiumPath = process.env.CHROME_BIN || "/usr/bin/chromium-browser";
+  if (require("fs").existsSync(chromiumPath)) {
+    options.setChromeBinaryPath(chromiumPath);
+    log(`🌐 Using Chrome at: ${chromiumPath}`);
+  } else {
+    log("⚠️ Using default Chrome path");
   }
-  log(`🌐 Using browser: ${executablePath}`);
 
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
-    ],
-  });
-
-  const page = await browser.newPage();
-  await page.setDefaultNavigationTimeout(30000);
+  let driver = await new Builder()
+    .forBrowser("chrome")
+    .setChromeOptions(options)
+    .build();
 
   let lastLoginTime = Date.now();
   let lastRefresh = Date.now();
 
-  // ----------- LOGIN -----------
   async function login() {
     log("🔐 Attempting login...");
-    await page.goto("https://orders.valuenet.com/Collaterals/", { waitUntil: "domcontentloaded" });
-
+    await driver.get("https://orders.valuenet.com/Collaterals/");
     try {
-      await page.waitForSelector("#ctl00_ContentPlaceHolder1_txtLogin", { timeout: 10000 });
-      await page.type("#ctl00_ContentPlaceHolder1_txtLogin", "rjimenez");
-      await page.type("#ctl00_ContentPlaceHolder1_txtPassword", "@@Exp+MansionTeam$1$1");
-      await page.click("#ctl00_ContentPlaceHolder1_btnsubmit");
-
+      await driver.wait(until.elementLocated(By.id("ctl00_ContentPlaceHolder1_txtLogin")), 10000);
+      await driver.findElement(By.id("ctl00_ContentPlaceHolder1_txtLogin")).sendKeys("rjimenez");
+      await driver.findElement(By.id("ctl00_ContentPlaceHolder1_txtPassword")).sendKeys("@@Exp+MansionTeam$1$1");
+      await driver.findElement(By.id("ctl00_ContentPlaceHolder1_btnsubmit")).click();
       try {
-        await page.waitForFunction(() => window.location.href.includes("Dashboard"), { timeout: 6000 });
+        await driver.wait(until.urlContains("Dashboard"), 6000);
         log("✅ Login successful");
-        lastLoginTime = Date.now();
       } catch {
-        // check for invalid credentials text
-        const bodyText = await page.evaluate(() => document.body.innerText);
-        if (bodyText.toLowerCase().includes("invalid") || bodyText.toLowerCase().includes("incorrect")) {
-          log("❌ Invalid credentials — check username/password");
-          await browser.close();
+        try {
+          await driver.wait(until.elementLocated(By.xpath("//*[contains(text(),'Invalid') or contains(text(),'incorrect')]")), 3000);
+          log("❌ Invalid credentials — exiting");
+          await driver.quit();
           process.exit(1);
-        }
-        // check verification challenge
-        const hasChallenge = await page.$('#ctl00_ContentPlaceHolder1_txtChallenge');
-        if (hasChallenge) {
-          log("🚨 Verification/challenge required — cannot proceed headlessly");
-          await browser.close();
+        } catch {}
+        try {
+          await driver.wait(until.elementLocated(By.id("ctl00_ContentPlaceHolder1_txtChallenge")), 3000);
+          log("🚨 Verification required — cannot proceed headlessly");
+          await driver.quit();
           process.exit(1);
-        }
-        log("⚠️ Login result unclear — proceeding");
-        lastLoginTime = Date.now();
+        } catch {}
       }
+      lastLoginTime = Date.now();
     } catch (err) {
       log(`❌ Login error: ${err.message}`);
-      await browser.close();
+      await driver.quit();
       process.exit(1);
     }
   }
 
-  // ----------- LOGOUT -----------
   async function logout() {
     try {
-      await page.click("#ctl00_userLogged");
-      await page.waitForTimeout(300);
-      await page.click("#ctl00_btnSignout");
-      await page.waitForSelector("#ctl00_ContentPlaceHolder1_txtLogin", { timeout: 8000 });
+      await driver.findElement(By.id("ctl00_userLogged")).click();
+      await driver.sleep(300);
+      await driver.findElement(By.id("ctl00_btnSignout")).click();
+      await driver.wait(until.elementLocated(By.id("ctl00_ContentPlaceHolder1_txtLogin")), 8000);
       log("✅ Logged out");
     } catch (err) {
       log(`❌ Logout failed: ${err.message}`);
     }
   }
 
-  // ----------- INJECT SNIFFERS -----------
   async function injectNetworkSniffer() {
     try {
-      await page.evaluate(NETWORK_SNIFFER_SCRIPT);
+      await driver.executeScript(NETWORK_SNIFFER_SCRIPT);
       log("🧩 Network + DOM hooks injected");
     } catch (err) {
       log(`❌ Injection failed: ${err.message}`);
     }
   }
 
-  // ----------- CLICK ACCEPT -----------
-  async function tryClickAccept() {
+  async function tryClickAcceptImmediate() {
     const selectors = [
       "#grabItBoardOrdersWidget a#lnkAcceptOrder",
       "#grabItBoardDisplay a#lnkAcceptOrder",
@@ -236,56 +212,42 @@ function looksLikeOrderMessage(raw) {
       "#newOrdersDisplay a#lnkAcceptOrder",
     ];
     for (const sel of selectors) {
-      try {
-        const elem = await page.$(sel);
-        if (elem) {
-          await elem.evaluate((el) => {
-            el.scrollIntoView(true);
-            el.click();
-          });
+      const elems = await driver.findElements(By.css(sel));
+      if (elems.length > 0) {
+        const btn = elems[0];
+        try {
+          await driver.executeScript("arguments[0].scrollIntoView(true);", btn);
+          await driver.executeScript("arguments[0].click();", btn);
           log(`⚡ CLICKED accept button (${sel})`);
-
-          // try logging row info
           try {
-            const rowText = await elem.evaluate((el) => {
-              const row = el.closest("tr");
-              return row ? row.innerText : "N/A";
-            });
-            logFile(`ACCEPTED - Websocket\n${rowText}\n-----------------`);
-            log(`📋 Order info: ${rowText.replace(/\n/g, " | ")}`);
+            const row = await btn.findElement(By.xpath("./ancestor::tr"));
+            const txt = await row.getText();
+            logFile(`ACCEPTED\n${txt}\n-----------------`);
+            log(`📋 Order: ${txt.replace(/\n/g, " | ")}`);
           } catch (e) {
-            logFile("ACCEPTED — row info not readable\n-----------------");
+            logFile("ACCEPTED — row not readable\n-----------------");
           }
-
-          await new Promise((r) => setTimeout(r, 350));
+          await new Promise(r => setTimeout(r, 350));
           return true;
+        } catch (clickErr) {
+          log(`⚠️ Click failed: ${clickErr.message}`);
         }
-      } catch (err) {
-        log(`⚠️ Click attempt failed on ${sel}: ${err.message}`);
       }
     }
     return false;
   }
 
-  // ----------- MAIN -----------
   try {
     await login();
-    await page.goto(
-      "https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard",
-      { waitUntil: "domcontentloaded" }
-    );
+    await driver.get("https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard");
     await injectNetworkSniffer();
     lastRefresh = Date.now();
-    log("📄 Dashboard loaded — sniffer active. Monitoring for orders...");
+    log("📄 Dashboard loaded — monitoring for orders...");
 
     while (true) {
-      // Refresh every 8 seconds
       if (Date.now() - lastRefresh >= 8000) {
         try {
-          await page.goto(
-            "https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard",
-            { waitUntil: "domcontentloaded" }
-          );
+          await driver.get("https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard");
           await injectNetworkSniffer();
           lastRefresh = Date.now();
           log("🔄 Dashboard refreshed");
@@ -294,26 +256,21 @@ function looksLikeOrderMessage(raw) {
         }
       }
 
-      // Re-login every 30 minutes
       if (minutesSince(lastLoginTime) >= 30) {
         await logout();
         await login();
-        await page.goto(
-          "https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard",
-          { waitUntil: "domcontentloaded" }
-        );
+        await driver.get("https://orders.valuenet.com/Collaterals/Site/VendorServices/DataCollectorDashboard");
         await injectNetworkSniffer();
         lastRefresh = Date.now();
       }
 
-      // 1) Check WebSocket/network message queue
       try {
-        const queued = await page.evaluate(() => {
+        const queued = await driver.executeScript(`
           try {
             if (!window.__vn_ws_messages) return [];
             return window.__vn_ws_messages.splice(0, 50);
-          } catch (e) { return []; }
-        });
+          } catch(e) { return []; }
+        `);
 
         if (queued && queued.length) {
           let foundOrder = false;
@@ -325,42 +282,33 @@ function looksLikeOrderMessage(raw) {
               }
             } catch (e) {}
           }
-
           if (foundOrder) {
-            const clicked = await tryClickAccept();
+            const clicked = await tryClickAcceptImmediate();
             if (!clicked) {
-              // fallback DOM scan
               try {
-                const hasBtn = await page.$(
-                  "#grabItBoardOrdersWidget a#lnkAcceptOrder, #newOrdersWidget a#lnkAcceptOrder"
-                );
-                if (hasBtn) {
-                  await hasBtn.evaluate((el) => el.click());
-                  log("⚡ Clicked accept via fallback DOM scan");
+                const btns = await driver.findElements(By.css("#grabItBoardOrdersWidget a#lnkAcceptOrder, #newOrdersWidget a#lnkAcceptOrder"));
+                if (btns.length > 0) {
+                  await driver.executeScript("arguments[0].click();", btns[0]);
+                  log("⚡ Clicked accept via fallback");
                 }
               } catch (e) {}
             }
           }
         }
       } catch (err) {
-        log(`⚠️ Error reading queue: ${err.message}`);
+        log(`⚠️ Queue error: ${err.message}`);
       }
 
-      // 2) Safety net DOM scan
       try {
-        const hasBtn = await page.$(
-          "#grabItBoardOrdersWidget a#lnkAcceptOrder, #newOrdersWidget a#lnkAcceptOrder"
-        );
-        if (hasBtn) {
-          await tryClickAccept();
-        }
+        const hasBtn = await driver.findElements(By.css("#grabItBoardOrdersWidget a#lnkAcceptOrder, #newOrdersWidget a#lnkAcceptOrder"));
+        if (hasBtn.length > 0) await tryClickAcceptImmediate();
       } catch (e) {}
 
-      await new Promise((r) => setTimeout(r, 25));
+      await new Promise(r => setTimeout(r, 25));
     }
   } catch (fatal) {
     log(`❌ Fatal error: ${fatal.message || fatal}`);
   } finally {
-    try { await browser.close(); } catch (e) {}
+    try { await driver.quit(); } catch (e) {}
   }
 })();
