@@ -2,12 +2,12 @@ services:
   - type: web
     name: mansion-bot-backend
     runtime: node
-    buildCommand: apt-get update && apt-get install -y chromium-browser && npm install
+    buildCommand: apt-get update && apt-get install -y chromium-browser chromium-chromedriver && npm install
     startCommand: node server.js
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PUPPETEER_SKIP_DOWNLOAD
-        value: "true"
-      - key: PUPPETEER_EXECUTABLE_PATH
+      - key: CHROME_BIN
         value: /usr/bin/chromium-browser
+      - key: PATH
+        value: /usr/lib/chromium-browser:/usr/bin:$PATH
