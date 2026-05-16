@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: mansion-bot-backend
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        value: "false"
+    # Render provides Chrome on its Linux environment
+    # puppeteer will download Chromium automatically during npm install
